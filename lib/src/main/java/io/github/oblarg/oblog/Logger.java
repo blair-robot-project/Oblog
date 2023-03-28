@@ -93,9 +93,12 @@ public class Logger {
   public static void configureLoggingAndConfig(Object rootContainer, boolean separate) {
     WrappedShuffleboard shuffleboard = new WrappedShuffleboard();
     configureLogging(
-        LogType.LOG, separate, rootContainer, shuffleboard, NetworkTableInstance.getDefault());
+            LogType.LOG, separate, rootContainer, shuffleboard, NetworkTableInstance.getDefault());
     configureLogging(
-        LogType.CONFIG, separate, rootContainer, shuffleboard, NetworkTableInstance.getDefault());
+            LogType.CONFIG, separate, rootContainer, shuffleboard, NetworkTableInstance.getDefault());
+    configureLogging(
+            LogType.LOGCOMP, separate, rootContainer, shuffleboard, NetworkTableInstance.getDefault());
+
   }
 
   /**
@@ -171,6 +174,11 @@ public class Logger {
         configFieldsAndMethods(
             rootContainer, rootContainer.getClass(), bin, nt, new HashSet<>(), new HashSet<>());
         break;
+      case LOGCOMP:
+        logFieldsAndMethods(
+                rootContainer, rootContainer.getClass(), bin, new HashSet<>(), new HashSet<>());
+        break;
+
     }
 
     // Set up method to be called on Loggables
@@ -263,7 +271,8 @@ public class Logger {
 
   enum LogType {
     LOG,
-    CONFIG
+    CONFIG,
+    LOGCOMP
   }
 
   private static SetterRunner setterRunner = new SetterRunner();
@@ -535,6 +544,33 @@ public class Logger {
                       () -> getFromMethod(supplier, params.methodName()).get());
                 }
               }),
+              entry(
+                      LogComp.class,
+                      (supplier, rawParams, bin, name) -> {
+                        Log params = (Log) rawParams;
+                        bin =
+                                params.tabName().equals("DEFAULT")
+                                        ? bin
+                                        : new WrappedShuffleboardContainer(Shuffleboard.getTab(params.tabName()));
+                        if (getFromMethod(supplier, params.methodName()).get() instanceof Sendable) {
+                          bin.add(
+                                          (params.name().equals("NO_NAME")) ? name : params.name(),
+                                          (Sendable) getFromMethod(supplier, params.methodName()).get())
+                                  .withPosition(params.rowIndex(), params.columnIndex())
+                                  .withSize(params.width(), params.height())
+                                  .withPosition(params.columnIndex(), params.rowIndex())
+                                  .withSize(params.width(), params.height());
+                        } else {
+                          Logger.registerEntry(
+                                  bin.add(
+                                                  (params.name().equals("NO_NAME")) ? name : params.name(),
+                                                  getFromMethod(supplier, params.methodName()).get())
+                                          .withPosition(params.columnIndex(), params.rowIndex())
+                                          .withSize(params.width(), params.height())
+                                          .getEntry(),
+                                  () -> getFromMethod(supplier, params.methodName()).get());
+                        }
+                      }),
           entry(
               Log.NumberBar.class,
               (supplier, rawParams, bin, name) -> {
@@ -1281,6 +1317,85 @@ public class Logger {
                 annotation,
                 bin,
                 method.getName());
+          }
+        }
+      }
+    }
+  }
+  private static void logCompFieldsAndMethods(
+          Object loggable,
+          Class loggableClass,
+          ShuffleboardContainerWrapper bin,
+          Set<Field> registeredFields,
+          Set<Method> registeredMethods) {
+
+    Set<Field> fields = Set.of(loggableClass.getDeclaredFields());
+    Set<Method> methods = Set.of(loggableClass.getDeclaredMethods());
+
+    // Process fields...
+    for (Field field : fields) {
+      if (isNull(field, loggable) || registeredFields.contains(field)) {
+        continue;
+      }
+      field.setAccessible(true);
+      registeredFields.add(field);
+
+      // Look for all log annotation types
+      for (Class type : logHandler.keySet()) {
+        // Get all annotations of each type
+        for (Annotation annotation : field.getAnnotationsByType(type)) {
+          // Get appropriate processing method for the given annotation type
+          FieldProcessor process = logHandler.get(annotation.annotationType());
+          if (process != null) {
+            // Process the field with the defined getter
+            process.processField(
+                    () -> {
+                      try {
+                        return field.get(loggable);
+                      } catch (IllegalAccessException e) {
+                        return null;
+                      }
+                    },
+                    annotation,
+                    bin,
+                    field.getName());
+          }
+        }
+      }
+    }
+
+    // Process methods...
+    for (Method method : methods) {
+
+      // Only look at getters
+      if (method.getReturnType().equals(Void.TYPE)
+              || method.getParameterTypes().length > 0
+              || registeredMethods.contains(method)) {
+        continue;
+      }
+
+      method.setAccessible(true);
+      registeredMethods.add(method);
+      // Look for all log annotation types
+      for (Class type : logHandler.keySet()) {
+        // Get all annotations of each type
+        for (Annotation annotation : method.getAnnotationsByType(type)) {
+          // Get appropriate processor for the given annotation type
+          FieldProcessor process = logHandler.get(annotation.annotationType());
+          if (process != null) {
+            // Process the getter (uses "processField" because the requirements are the same)
+            process.processField(
+                    () -> {
+                      try {
+                        return method.invoke(loggable);
+                      } catch (IllegalAccessException | InvocationTargetException e) {
+                        e.printStackTrace();
+                        return null;
+                      }
+                    },
+                    annotation,
+                    bin,
+                    method.getName());
           }
         }
       }
